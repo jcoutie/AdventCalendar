@@ -46,14 +46,14 @@ Every improvement, colour tweak, and animation was vibe-coded to perfection.
 
 ## ⚙️ Hardware Used
 
-| Component | Description / Notes |
-|------------|--------------------|
-| **ESP8266MOD (AI-Thinker)** | Wi-Fi microcontroller used to host the web UI and drive the LEDs | https://amzn.to/47Jnhzy
-| **WS2811 RGB Pixel LEDs** | 50-LED string (IP68, 12 mm diffused nodes) | https://amzn.to/4p5qf6Z
-| **5 V Power Supply** | Shared between LEDs and ESP8266 (VIN and GND connected to common supply) |
-| **Data Pin** | Connected to GPIO 4 (`D4`) on the ESP8266 |
-| **FastLED Library** | Handles pixel colour and animation control |
-| **ESP8266WebServer Library** | Hosts the web interface for control |
+| Component | Description / Notes | Amazon link |
+|------------|--------------------|-----------------|
+| **ESP8266MOD (AI-Thinker)** | Wi-Fi microcontroller used to host the web UI and drive the LEDs | https://amzn.to/47Jnhzy |
+| **WS2811 RGB Pixel LEDs** | 50-LED string (IP68, 12 mm diffused nodes) | https://amzn.to/4p5qf6Z |
+| **5 V Power Supply** | Shared between LEDs and ESP8266 (VIN and GND connected to common supply) | |
+| **Data Pin** | Connected to GPIO 4 (`D4`) on the ESP8266 | |
+| **FastLED Library** | Handles pixel colour and animation control | |
+| **ESP8266WebServer Library** | Hosts the web interface for control | |
 * Amazon affiliate links for products if you feel generous, but you can probably find them cheaper on other sites
 
 ---
