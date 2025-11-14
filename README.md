@@ -40,7 +40,7 @@ Each drawer in a physical Christmas tree advent calendar lights up with a corres
 ## 🧠 The ChatGPT Bit
 
 This entire project — from the idea, code, animations, and UI design to the debugging process — was **fully written collaboratively with ChatGPT (GPT-5)**, one message at a time.  
-Every improvement, colour tweak, and animation was vibe-coded to perfection.  (Editor's note, this section was written by ChatGPT too)
+Every improvement, colour tweak, and animation was vibe-coded to perfection.  
 
 ---
 
@@ -48,12 +48,13 @@ Every improvement, colour tweak, and animation was vibe-coded to perfection.  (E
 
 | Component | Description / Notes |
 |------------|--------------------|
-| **ESP8266MOD (AI-Thinker)** | Wi-Fi microcontroller used to host the web UI and drive the LEDs |
-| **WS2811 RGB Pixel LEDs** | 50-LED string (IP68, 12 mm diffused nodes) |
+| **ESP8266MOD (AI-Thinker)** | Wi-Fi microcontroller used to host the web UI and drive the LEDs | https://amzn.to/47Jnhzy
+| **WS2811 RGB Pixel LEDs** | 50-LED string (IP68, 12 mm diffused nodes) | https://amzn.to/4p5qf6Z
 | **5 V Power Supply** | Shared between LEDs and ESP8266 (VIN and GND connected to common supply) |
 | **Data Pin** | Connected to GPIO 4 (`D4`) on the ESP8266 |
 | **FastLED Library** | Handles pixel colour and animation control |
 | **ESP8266WebServer Library** | Hosts the web interface for control |
+* Amazon affiliate links for products if you feel generous, but you can probably find them cheaper on other sites
 
 ---
 
@@ -73,3 +74,38 @@ Every improvement, colour tweak, and animation was vibe-coded to perfection.  (E
    ```cpp
    const char* WIFI_SSID = "YourWiFiName";
    const char* WIFI_PASS = "YourWiFiPassword";
+   ```
+3. **Power up** the ESP8266 and WS2811 string with a 5 V supply.
+4. Open the **Serial Monitor** to find the ESP’s IP address.
+5. Open that IP in a web browser — the control page will appear.
+6. Enjoy the sparkle ✨
+
+---
+
+## 🧪 Configuration
+
+At the top of the script you can modify:
+```cpp
+#define PAST_IS_RED false   // false = past green, true = past red
+uint32_t DATE_SHUFFLE_SEED = 1333592070; // change to re-map LED order
+```
+
+---
+
+## 💡 Future Ideas
+
+- Integration with Google Home / voice control
+- Daily auto-unlock logic synced to the calendar
+- Physical button inputs for manual interaction
+- MQTT or Home Assistant integration
+
+---
+
+## 📜 License
+
+This project is released under the **MIT License** — share, remix, and enjoy!
+
+---
+
+**Made with love, LEDs, and vibes.**  
+*— James Coutie + ChatGPT*
