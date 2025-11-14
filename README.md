@@ -5,6 +5,10 @@ Each drawer in a physical Christmas tree advent calendar lights up with a corres
 
 ---
 
+[![Advent Calendar LED Tree Demo](https://img.youtube.com/vi/O-re4CkIFE0/hqdefault.jpg)](https://youtu.be/O-re4CkIFE0)
+
+---
+
 ## ✨ Features
 
 - **Two primary modes:**
