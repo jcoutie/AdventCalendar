@@ -1,0 +1,536 @@
+// Advent_v0.11 — Colour toggle + simpler UI (arrows under the number)
+//
+// - Button toggles colour mapping at runtime:
+//     Past=Red/Future=Green  <->  Past=Green/Future=Red
+// - Prev/Next arrows placed side-by-side under the big center day.
+// - Debug seed panel/endpoints from v0.10 kept (debug button still hidden in UI).
+//
+// Hardware: ESP8266 + WS2811, COLOR_ORDER = RGB (matches your strip channels)
+
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <FastLED.h>
+#include <math.h>
+
+// -------- WIFI --------
+const char* WIFI_SSID = "Wifi_SSID";
+const char* WIFI_PASS = "Wifi_Password";
+
+// -------- PHYSICAL STRIP --------
+#define NUM_PHYS_LEDS 50
+const uint8_t USED_LEDS[] = {
+  25,26,27,29,30,31,32,33,34,35,36,37,
+  38,39,40,41,42,43,44,45,46,47,48,49
+};
+const uint8_t USED_COUNT = sizeof(USED_LEDS)/sizeof(USED_LEDS[0]); // 24
+
+// -------- LED TYPE/BRIGHT --------
+#define DATA_PIN       4
+#define LED_TYPE       WS2811
+#define COLOR_ORDER    RGB
+#define BRIGHTNESS     96
+
+// -------- TIMERS / PERIODS -------
+uint32_t SLEEP_PERIOD_MS       = 20000;
+const uint32_t FRAME_INTERVAL  = 15;
+const uint32_t INACTIVITY_MS   = 180000;
+
+// Advent phases
+const uint32_t ADVENT_TWINKLE_TOTAL_MS = 10000;
+const uint32_t ADVENT_BLACKOUT_MS      = 1000;
+const uint16_t TWINKLE_INTERVAL_START  = 140;
+const uint16_t TWINKLE_INTERVAL_END    = 25;
+const float    PULSE_PERIOD_MS         = 1500.0f;
+
+// -------- DATE INDEX SHUFFLE ----
+uint32_t DATE_SHUFFLE_SEED = 1333592070; // mutable; UI shows via /status
+
+// -------- FLAGS (mutable) --------
+bool DEBUG_VIS     = false; // toggle via /debug/toggle (UI button hidden)
+bool PAST_IS_RED   = false;  // <— NEW: toggle via /colors/toggle
+
+// -------- GLOBALS ---------------
+CRGB leds[NUM_PHYS_LEDS];
+ESP8266WebServer server(80);
+
+enum Mode { MODE_SLEEP, MODE_ADVENT };
+Mode mode = MODE_SLEEP;
+
+uint8_t currentDay = 1; // 1..USED_COUNT
+uint32_t lastRender = 0;
+uint32_t lastActivity = 0;
+
+// Sleep state
+uint32_t ledPhaseOffset[USED_COUNT];
+uint16_t ledPrevLocalTms[USED_COUNT];
+CRGB     ledColor[USED_COUNT];
+
+// Day index (1..USED_COUNT) per USED_LEDS entry
+uint8_t dayIndexForUsed[USED_COUNT];
+
+// Advent state
+enum AdventPhase { ADV_TWINKLE, ADV_BLACKOUT, ADV_SHOW };
+AdventPhase adventPhase = ADV_TWINKLE;
+uint32_t adventPhaseStartMs = 0;
+uint32_t lastTwinkleMs = 0;
+
+// -------- HTML UI ---------------
+const char* INDEX_HTML = R"HTML(
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Advent LEDs</title>
+<style>
+  :root { --fg:#e5e7eb; --fg-dim:#9ca3af; --bg:#000; --accent:#22d3ee; --btn:#111827; --btnText:#e5e7eb; --warn:#ef4444; }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%}
+  body{
+    margin:0; background:#000; color:var(--fg);
+    font-family:ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Arial, sans-serif;
+    min-height:100svh; display:flex; align-items:center; justify-content:center;
+    padding: max(env(safe-area-inset-top),8px) max(env(safe-area-inset-right),8px)
+             max(env(safe-area-inset-bottom),8px) max(env(safe-area-inset-left),8px);
+  }
+  .wrap{ width:100%; max-width:620px; padding:16px; text-align:center }
+  h1{ margin:0 0 8px 0; font-size:18px; color:var(--fg-dim); font-weight:600; letter-spacing:.02em }
+  .controls{ display:flex; gap:10px; justify-content:center; margin:10px 0 6px; flex-wrap:wrap }
+  button{
+    background:var(--btn); color:var(--btnText); border:1px solid #1f2937; border-radius:14px;
+    padding:12px 16px; font-size:16px; cursor:pointer; min-width:140px; touch-action:manipulation;
+  }
+  #modeBtn.warn{ background:#1a0b0b; border-color:#3f1d1d; }
+  .glass{
+    margin:12px auto 6px; padding:20px; width:min(95vw,540px);
+    background:linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02));
+    border:1px solid rgba(255,255,255,.1); border-radius:20px; backdrop-filter: blur(6px);
+    box-shadow: 0 0 40px rgba(34,211,238,.08), inset 0 0 20px rgba(255,255,255,.02);
+  }
+  .circle{
+    width:min(70vw,240px); height:min(70vw,240px);
+    border-radius:50%; display:flex; align-items:center; justify-content:center;
+    background:#0b1220; border:1px solid rgba(255,255,255,.12);
+    box-shadow: 0 0 30px rgba(34,211,238,.12) inset, 0 0 40px rgba(34,211,238,.06);
+    cursor:pointer; user-select:none; margin: 0 auto 10px;
+  }
+  .big{ font-size: clamp(48px, 14vw, 84px); font-weight:800; color:#fff; }
+  .sub{ color:var(--fg-dim); font-size:12px; margin-top:6px }
+  .underArrows{ display:flex; gap:12px; justify-content:center; margin-top:6px }
+  .navBtn{ width:120px; height:54px; border-radius:12px; font-size:18px; }
+  .stats{ display:flex; justify-content:space-between; font-size:13px; color:var(--fg-dim); margin-top:10px }
+  .stats div strong{ color:var(--fg) }
+  #daySelect{ position:absolute; opacity:0; pointer-events:none; height:0; width:0; }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Advent Tree</h1>
+
+    <div class="controls">
+      <button id="modeBtn" onclick="toggleMode()">...</button>
+      <button onclick="jumpToday()">Today</button>
+      <!-- <button id="colorBtn" onclick="toggleColors()">...</button> --!>
+    </div>
+
+    <div class="glass">
+      <div class="circle" onclick="openPicker()" title="Tap to jump to any day">
+        <div>
+          <div id="centerDay" class="big">--</div>
+          <div class="sub">day</div>
+        </div>
+      </div>
+
+      <div class="underArrows">
+        <button class="navBtn" onclick="prevDay()">◀ Prev</button>
+        <button class="navBtn" onclick="nextDay()">Next ▶</button>
+      </div>
+
+      <div class="stats">
+        <div>Total dates: <strong id="count">--</strong></div>
+        <div>Current day: <strong id="currDay">--</strong></div>
+      </div>
+    </div>
+
+    <select id="daySelect"></select>
+  </div>
+
+<script>
+let USED_COUNT = 24;
+let currentDay = 1;
+let mode = 'SLEEP';
+let pastIsRed = true;     // from server
+let didInitTodaySync = false;
+
+function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+function deviceTodayClamped(){ return clamp(new Date().getDate(), 1, USED_COUNT); }
+
+const centerDayEl = document.getElementById('centerDay');
+const countEl = document.getElementById('count');
+const currEl = document.getElementById('currDay');
+const modeBtn = document.getElementById('modeBtn');
+const colorBtn = document.getElementById('colorBtn');
+const daySelect = document.getElementById('daySelect');
+
+function buildSelect(){
+  daySelect.innerHTML = '';
+  for (let i=1;i<=USED_COUNT;i++){
+    const opt = document.createElement('option');
+    opt.value = i; opt.textContent = i;
+    daySelect.appendChild(opt);
+  }
+  daySelect.value = currentDay;
+}
+
+async function setDay(d){
+  d = clamp(d, 1, USED_COUNT);
+  currentDay = d;
+  centerDayEl.textContent = d;
+  currEl.textContent = d;
+  daySelect.value = d;
+  await fetch(`/setDay?d=${d}`);
+}
+
+function openPicker(){
+  try { if (daySelect.showPicker) { daySelect.value=currentDay; daySelect.showPicker(); }
+    else { daySelect.style.opacity=1; daySelect.style.pointerEvents='auto'; daySelect.focus(); daySelect.click(); }
+  } catch(e){ daySelect.style.opacity=1; daySelect.style.pointerEvents='auto'; daySelect.focus(); daySelect.click(); }
+}
+daySelect.addEventListener('change', ()=> setDay(parseInt(daySelect.value||'1')));
+daySelect.addEventListener('blur', ()=>{ daySelect.style.opacity=0; daySelect.style.pointerEvents='none'; });
+
+async function refresh(){
+  const r = await fetch('/status'); const s = await r.json();
+  USED_COUNT = s.used_count || 24;
+  const serverDay = s.current_day || 1;
+  mode = s.mode || 'SLEEP';
+  pastIsRed = !!s.past_is_red;
+
+  if (!didInitTodaySync){
+    didInitTodaySync = true;
+    const devDay = deviceTodayClamped();
+    if (devDay !== serverDay){ await setDay(devDay); }
+    else { currentDay = serverDay; }
+  } else {
+    currentDay = serverDay;
+  }
+
+  countEl.textContent = USED_COUNT;
+  centerDayEl.textContent = currentDay;
+  currEl.textContent = currentDay;
+
+  modeBtn.textContent = (mode === 'SLEEP') ? 'Enter Advent Mode' : 'Enter Sleep Mode';
+  modeBtn.className = (mode === 'SLEEP') ? '' : 'warn';
+  colorBtn.textContent = pastIsRed ? 'Colours: Past Red' : 'Colours: Past Green';
+
+  buildSelect();
+}
+
+async function toggleMode(){ await fetch('/mode/toggle',{method:'POST'}); refresh(); }
+async function nextDay(){ await setDay(currentDay >= USED_COUNT ? 1 : (currentDay+1)); }
+async function prevDay(){ await setDay(currentDay <= 1 ? USED_COUNT : (currentDay-1)); }
+async function jumpToday(){ await setDay(deviceTodayClamped()); }
+async function toggleColors(){ await fetch('/colors/toggle',{method:'POST'}); refresh(); }
+
+setInterval(refresh, 2500);
+refresh();
+</script>
+</body>
+</html>
+)HTML";
+
+// -------- UTILS -----------------
+inline float clamp01(float x){ return x<0?0:(x>1?1:x); }
+float easeBreath(float t){ return 0.5f * (1.0f - cosf(2.0f * 3.14159265f * t)); }
+CRGB randRedOrGreen(){ return (random(0,2)==0) ? CRGB::Red : CRGB::Green; }
+const char* modeName(){ return (mode==MODE_SLEEP) ? "SLEEP" : "ADVENT"; }
+
+template<typename T>
+void fisherYates(T* a, int n, unsigned long seed){
+  randomSeed(seed);
+  for(int i=n-1;i>0;--i){
+    long j = random(0, i+1);
+    T tmp=a[i]; a[i]=a[j]; a[j]=tmp;
+  }
+}
+
+void buildDateIndices(){
+  uint8_t order[USED_COUNT];
+  for (int i=0;i<USED_COUNT;++i) order[i] = i+1; // 1..N
+  fisherYates(order, USED_COUNT, DATE_SHUFFLE_SEED);
+  for (int i=0;i<USED_COUNT;++i) dayIndexForUsed[i] = order[i];
+
+  Serial.printf("Seed=%lu -> mapping (phys -> day):\n", (unsigned long)DATE_SHUFFLE_SEED);
+  for (int k=0;k<USED_COUNT;++k){
+    Serial.printf("  %02d -> %02d\n", USED_LEDS[k], dayIndexForUsed[k]);
+  }
+}
+
+void forceImmediateRefresh(){
+  lastRender = 0;
+  if (mode == MODE_SLEEP) {
+    uint32_t now = millis();
+    if (DEBUG_VIS) {
+      fill_solid(leds, NUM_PHYS_LEDS, CRGB::Black);
+      for (int k=0;k<USED_COUNT;++k){
+        uint8_t phys = USED_LEDS[k];
+        uint8_t day  = dayIndexForUsed[k];
+        leds[phys] = (day % 2 == 1) ? CRGB::Green : CRGB::Red;
+      }
+      FastLED.show();
+    } else {
+      initPerLedSleepState(now);
+      renderSleep(now);
+    }
+  } else if (mode == MODE_ADVENT) {
+    renderAdvent(millis());
+  }
+}
+
+// -------- SLEEP MODE -----------
+void initPerLedSleepState(uint32_t now) {
+  for (int k=0;k<USED_COUNT;++k){
+    ledPhaseOffset[k] = random(0, SLEEP_PERIOD_MS);
+    ledColor[k]       = randRedOrGreen();
+    uint32_t localTms = (now + ledPhaseOffset[k]) % SLEEP_PERIOD_MS;
+    ledPrevLocalTms[k]= (uint16_t)localTms;
+  }
+}
+
+void enterSleepMode() {
+  mode = MODE_SLEEP;
+  initPerLedSleepState(millis());
+  Serial.println("Entering SLEEP mode");
+}
+
+void renderSleep(uint32_t now) {
+  if (DEBUG_VIS) {
+    fill_solid(leds, NUM_PHYS_LEDS, CRGB::Black);
+    for (int k=0;k<USED_COUNT;++k){
+      uint8_t phys = USED_LEDS[k];
+      uint8_t day  = dayIndexForUsed[k];
+      leds[phys] = (day % 2 == 1) ? CRGB::Green : CRGB::Red;
+    }
+    FastLED.show();
+    return;
+  }
+
+  fill_solid(leds, NUM_PHYS_LEDS, CRGB::Black);
+  for (int k=0;k<USED_COUNT;++k){
+    uint8_t phys = USED_LEDS[k];
+    uint32_t localTms = (now + ledPhaseOffset[k]) % SLEEP_PERIOD_MS;
+    if ((uint16_t)localTms < ledPrevLocalTms[k]) ledColor[k] = randRedOrGreen();
+    ledPrevLocalTms[k] = (uint16_t)localTms;
+    float t = (float)localTms / (float)SLEEP_PERIOD_MS;
+    float b = easeBreath(t);
+    uint8_t bri = (uint8_t)(b * 255.0f);
+    CRGB c = ledColor[k]; c.nscale8_video(bri);
+    leds[phys] = c;
+  }
+  FastLED.show();
+}
+
+// -------- ADVENT MODE -----------
+void enterAdventMode(){
+  mode = MODE_ADVENT;
+  adventPhase = ADV_TWINKLE;
+  adventPhaseStartMs = millis();
+  lastTwinkleMs = 0;
+  Serial.println("Entering ADVENT mode (Twinkle phase)");
+}
+
+void renderAdventTwinkle(uint32_t now){
+  uint32_t elapsed = now - adventPhaseStartMs;
+  float f = clamp01((float)elapsed / (float)ADVENT_TWINKLE_TOTAL_MS);
+  uint16_t interval = (uint16_t)((1.0f - f) * TWINKLE_INTERVAL_START + f * TWINKLE_INTERVAL_END);
+
+  for (int k=0;k<USED_COUNT;++k) leds[ USED_LEDS[k] ].fadeToBlackBy(48);
+
+  if (lastTwinkleMs == 0 || (now - lastTwinkleMs) >= interval){
+    lastTwinkleMs = now;
+    int k = random(0, USED_COUNT);
+    uint8_t phys = USED_LEDS[k];
+    leds[phys] = (random(0,2)==0) ? CRGB::Red : CRGB::Green;
+  }
+  FastLED.show();
+
+  if (elapsed >= ADVENT_TWINKLE_TOTAL_MS){
+    adventPhase = ADV_BLACKOUT;
+    adventPhaseStartMs = now;
+    fill_solid(leds, NUM_PHYS_LEDS, CRGB::Black);
+    FastLED.show();
+    Serial.println("Advent phase -> BLACKOUT");
+  }
+}
+
+void renderAdventBlackout(uint32_t now){
+  if (now - adventPhaseStartMs >= ADVENT_BLACKOUT_MS){
+    adventPhase = ADV_SHOW;
+    adventPhaseStartMs = now;
+    Serial.println("Advent phase -> SHOW");
+  }
+}
+
+void renderAdventShow(uint32_t now){
+  // Map by runtime toggle
+  //   PAST_IS_RED = true  -> past red / future green
+  //   PAST_IS_RED = false -> past green / future red
+  fill_solid(leds, NUM_PHYS_LEDS, CRGB::Black);
+
+  for (int k=0; k<USED_COUNT; ++k){
+    const uint8_t phys = USED_LEDS[k];
+    const uint8_t day  = dayIndexForUsed[k];
+
+    if (day < currentDay) {
+      leds[phys] = PAST_IS_RED ? CRGB::Red : CRGB::Green;
+    } else if (day > currentDay) {
+      leds[phys] = PAST_IS_RED ? CRGB::Green : CRGB::Red;
+    } else {
+      float t = (float)(now - adventPhaseStartMs);
+      float phase = fmodf(t, PULSE_PERIOD_MS) / PULSE_PERIOD_MS; // 0..1
+      float b = 0.5f * (1.0f + sinf(2.0f * 3.14159265f * phase));
+      CRGB y = CRGB::Yellow; y.nscale8_video((uint8_t)(b * 255.0f));
+      leds[phys] = y;
+    }
+  }
+  FastLED.show();
+}
+
+void renderAdvent(uint32_t now){
+  switch(adventPhase){
+    case ADV_TWINKLE: renderAdventTwinkle(now); break;
+    case ADV_BLACKOUT: renderAdventBlackout(now); break;
+    case ADV_SHOW: renderAdventShow(now); break;
+  }
+}
+
+// --------- SETUP / ROUTES -------
+void buildAndRefresh(){ buildDateIndices(); forceImmediateRefresh(); }
+
+void setup() {
+  delay(200);
+  Serial.begin(115200);
+  Serial.println();
+  Serial.println(F("=== Advent_v0.11 starting ==="));
+
+  FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_PHYS_LEDS);
+  FastLED.setBrightness(BRIGHTNESS);
+  fill_solid(leds, NUM_PHYS_LEDS, CRGB::Black);
+  FastLED.show();
+
+  buildDateIndices();
+  currentDay = 1;
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.printf("Connecting to WiFi SSID: %s", WIFI_SSID);
+  while (WiFi.status() != WL_CONNECTED) { delay(300); Serial.print("."); }
+  Serial.println();
+  Serial.print("Connected. IP address: "); Serial.println(WiFi.localIP());
+
+  // UI
+  server.on("/", HTTP_GET, [](){
+    lastActivity = millis();
+    server.send(200, "text/html", INDEX_HTML);
+  });
+
+  server.on("/status", HTTP_GET, [](){
+    lastActivity = millis();
+    String json = "{";
+    json += "\"mode\":\""; json += modeName(); json += "\",";
+    json += "\"used_count\":"; json += String(USED_COUNT); json += ",";
+    json += "\"current_day\":"; json += String(currentDay); json += ",";
+    json += "\"debug_vis\":"; json += (DEBUG_VIS ? "true" : "false"); json += ",";
+    json += "\"seed\":"; json += String((unsigned long)DATE_SHUFFLE_SEED); json += ",";
+    json += "\"past_is_red\":"; json += (PAST_IS_RED ? "true" : "false");
+    json += "}";
+    server.send(200, "application/json", json);
+  });
+
+  server.on("/mode/toggle", HTTP_POST, [](){
+    lastActivity = millis();
+    if (mode == MODE_SLEEP) enterAdventMode(); else enterSleepMode();
+    server.send(204);
+  });
+
+  server.on("/setDay", HTTP_GET, [](){
+    lastActivity = millis();
+    if (server.hasArg("d")){
+      int d = server.arg("d").toInt();
+      if (d >= 1 && d <= (int)USED_COUNT) currentDay = (uint8_t)d;
+      int past=0, future=0, today=0;
+      for (int k=0;k<USED_COUNT;++k){
+        uint8_t dd = dayIndexForUsed[k];
+        if (dd < currentDay) past++; else if (dd > currentDay) future++; else today++;
+      }
+      Serial.printf("Day=%u -> past=%d, today=%d, future=%d\n", currentDay, past, today, future);
+    }
+    server.send(200, "text/plain", "OK");
+  });
+
+  // ---- Colour mapping toggle ----
+  server.on("/colors/toggle", HTTP_POST, [](){
+    lastActivity = millis();
+    PAST_IS_RED = !PAST_IS_RED;
+    Serial.printf("PAST_IS_RED -> %s\n", PAST_IS_RED ? "true" : "false");
+    forceImmediateRefresh();
+    server.send(204);
+  });
+
+  // ---- Debug toggle (kept) ----
+  server.on("/debug/toggle", HTTP_POST, [](){
+    lastActivity = millis();
+    DEBUG_VIS = !DEBUG_VIS;
+    Serial.printf("DEBUG_VIS -> %s\n", DEBUG_VIS ? "ON" : "OFF");
+    forceImmediateRefresh();
+    server.send(204);
+  });
+
+  // ---- Seed tools (kept) ----
+  server.on("/seed/randomize", HTTP_POST, [](){
+    lastActivity = millis();
+    uint32_t entropy = millis();
+    uint16_t ar = analogRead(A0);
+    DATE_SHUFFLE_SEED = ((entropy & 0xFFFF) << 16) | (ar & 0xFFFF);
+    if (DATE_SHUFFLE_SEED == 0) DATE_SHUFFLE_SEED = entropy | 1;
+    Serial.printf("Randomised seed -> %lu\n", (unsigned long)DATE_SHUFFLE_SEED);
+    buildAndRefresh();
+    server.send(204);
+  });
+
+  server.on("/seed/set", HTTP_GET, [](){
+    lastActivity = millis();
+    if (server.hasArg("v")) {
+      uint32_t v = (uint32_t) strtoul(server.arg("v").c_str(), nullptr, 0);
+      if (v == 0) v = 1;
+      DATE_SHUFFLE_SEED = v;
+      Serial.printf("Seed set -> %lu\n", (unsigned long)DATE_SHUFFLE_SEED);
+      buildAndRefresh();
+    }
+    server.send(200, "text/plain", "OK");
+  });
+
+  server.begin();
+  Serial.println("HTTP server started on port 80.");
+
+  enterSleepMode();
+  lastActivity = millis();
+}
+
+// ---------- LOOP ----------------
+void loop() {
+  server.handleClient();
+  uint32_t now = millis();
+
+  if (mode == MODE_ADVENT && (now - lastActivity >= INACTIVITY_MS)) {
+    Serial.println("Inactivity timeout -> auto-entering SLEEP mode");
+    enterSleepMode();
+  }
+
+  if (now - lastRender >= FRAME_INTERVAL) {
+    lastRender = now;
+    if (mode == MODE_SLEEP)       renderSleep(now);
+    else if (mode == MODE_ADVENT) renderAdvent(now);
+  }
+}
